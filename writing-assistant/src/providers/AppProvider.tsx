@@ -1,6 +1,6 @@
 'use client'
 
-import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useEffect, ReactNode, useCallback, useMemo } from 'react';
 import { Post, ChatConversation, UserSettings, AppState } from '@/types';
 import { storageService } from '@/services/storage';
 
@@ -125,7 +125,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
   // Initialize storage and load data
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       dispatch({ type: 'SET_LOADING', payload: true });
       await storageService.init();
@@ -144,10 +144,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
-  };
+  }, []);
 
   // Post actions
-  const createPost = async (title: string, content: string = ''): Promise<Post> => {
+  const createPost = useCallback(async (title: string, content: string = ''): Promise<Post> => {
     const now = new Date();
     const post: Post = {
       id: generateId(),
@@ -171,9 +171,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_ERROR', payload: 'Failed to create post' });
       throw error;
     }
-  };
+  }, []);
 
-  const updatePost = async (post: Post): Promise<void> => {
+  const updatePost = useCallback(async (post: Post): Promise<void> => {
     const updatedPost = {
       ...post,
       updatedAt: new Date(),
@@ -190,9 +190,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_ERROR', payload: 'Failed to update post' });
       throw error;
     }
-  };
+  }, []);
 
-  const deletePost = async (id: string): Promise<void> => {
+  const deletePost = useCallback(async (id: string): Promise<void> => {
     try {
       await storageService.deletePost(id);
       dispatch({ type: 'DELETE_POST', payload: id });
@@ -202,14 +202,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_ERROR', payload: 'Failed to delete post' });
       throw error;
     }
-  };
+  }, []);
 
-  const setCurrentPost = (post: Post | null) => {
+  const setCurrentPost = useCallback((post: Post | null) => {
     dispatch({ type: 'SET_CURRENT_POST', payload: post });
-  };
+  }, []);
 
   // Conversation actions
-  const createConversation = async (title: string): Promise<ChatConversation> => {
+  const createConversation = useCallback(async (title: string): Promise<ChatConversation> => {
     const now = new Date();
     const conversation: ChatConversation = {
       id: generateId(),
@@ -228,9 +228,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_ERROR', payload: 'Failed to create conversation' });
       throw error;
     }
-  };
+  }, []);
 
-  const updateConversation = async (conversation: ChatConversation): Promise<void> => {
+  const updateConversation = useCallback(async (conversation: ChatConversation): Promise<void> => {
     const updatedConversation = {
       ...conversation,
       updatedAt: new Date(),
@@ -245,9 +245,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_ERROR', payload: 'Failed to update conversation' });
       throw error;
     }
-  };
+  }, []);
 
-  const deleteConversation = async (id: string): Promise<void> => {
+  const deleteConversation = useCallback(async (id: string): Promise<void> => {
     try {
       await storageService.deleteConversation(id);
       dispatch({ type: 'DELETE_CONVERSATION', payload: id });
@@ -257,22 +257,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_ERROR', payload: 'Failed to delete conversation' });
       throw error;
     }
-  };
+  }, []);
 
-  const setCurrentConversation = (conversation: ChatConversation | null) => {
+  const setCurrentConversation = useCallback((conversation: ChatConversation | null) => {
     dispatch({ type: 'SET_CURRENT_CONVERSATION', payload: conversation });
-  };
+  }, []);
 
-  const setError = (error: string | null) => {
+  const setError = useCallback((error: string | null) => {
     dispatch({ type: 'SET_ERROR', payload: error });
-  };
+  }, []);
 
   // Load data on mount
   useEffect(() => {
     loadData();
   }, []);
 
-  const actions = {
+  const actions = useMemo(() => ({
     loadData,
     createPost,
     updatePost,
@@ -283,7 +283,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     deleteConversation,
     setCurrentConversation,
     setError,
-  };
+  }), [loadData, createPost, updatePost, deletePost, setCurrentPost, createConversation, updateConversation, deleteConversation, setCurrentConversation, setError]);
 
   return (
     <AppContext.Provider value={{ state, dispatch, actions }}>

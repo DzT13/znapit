@@ -61,20 +61,20 @@ export default function PostEditorPage() {
     if (postId) {
       loadPost();
     }
-  }, [postId, state.posts, actions, router]);
+  }, [postId]); // Remove state.posts, actions, router to prevent infinite loops
 
-  // Auto-save functionality
+  // Auto-save functionality - using interval to prevent infinite loops
   useEffect(() => {
     if (!currentPost) return;
 
     const autoSaveInterval = setInterval(async () => {
-      if (currentPost && isSaving === false) {
+      if (currentPost && !isSaving) {
         await handleSave();
       }
     }, 30000); // Auto-save every 30 seconds
 
     return () => clearInterval(autoSaveInterval);
-  }, [currentPost, isSaving]);
+  }, []); // Empty dependency array to prevent loops
 
   const handleSave = async () => {
     if (!currentPost || isSaving) return;
@@ -104,10 +104,19 @@ export default function PostEditorPage() {
   const handleContentChange = (content: string) => {
     if (!currentPost) return;
     
-    setCurrentPost({
+    const updatedPost = {
       ...currentPost,
-      content
-    });
+      content,
+      wordCount: countWords(content),
+      updatedAt: new Date()
+    };
+    
+    setCurrentPost(updatedPost);
+  };
+
+  // Helper function to count words
+  const countWords = (text: string): number => {
+    return text.trim().split(/\s+/).filter(word => word.length > 0).length;
   };
 
   const handleStatusChange = (status: Post['status']) => {

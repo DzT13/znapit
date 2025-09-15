@@ -6,20 +6,28 @@ class LocalStorageService {
   private db: IDBDatabase | null = null;
 
   async init(): Promise<void> {
+    // Check if we're in a browser environment
+    if (typeof window === 'undefined' || !window.indexedDB) {
+      throw new StorageError('IndexedDB not available');
+    }
+
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(this.dbName, this.dbVersion);
 
       request.onerror = () => {
+        console.error('Failed to open IndexedDB:', request.error);
         reject(new StorageError('Failed to open database'));
       };
 
       request.onsuccess = () => {
         this.db = request.result;
+        console.log('IndexedDB initialized successfully');
         resolve();
       };
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
+        console.log('Upgrading IndexedDB schema');
 
         // Create posts object store
         if (!db.objectStoreNames.contains('posts')) {
@@ -27,6 +35,7 @@ class LocalStorageService {
           postsStore.createIndex('status', 'status', { unique: false });
           postsStore.createIndex('createdAt', 'createdAt', { unique: false });
           postsStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+          console.log('Created posts object store');
         }
 
         // Create conversations object store
@@ -34,11 +43,13 @@ class LocalStorageService {
           const conversationsStore = db.createObjectStore('conversations', { keyPath: 'id' });
           conversationsStore.createIndex('createdAt', 'createdAt', { unique: false });
           conversationsStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+          console.log('Created conversations object store');
         }
 
         // Create settings object store
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings', { keyPath: 'id' });
+          console.log('Created settings object store');
         }
       };
     });
@@ -78,6 +89,8 @@ class LocalStorageService {
 
   async savePost(post: Post): Promise<void> {
     this.ensureDB();
+    console.log('Saving post to IndexedDB:', post.id, post.title);
+    
     const transaction = this.db!.transaction(['posts'], 'readwrite');
     const store = transaction.objectStore('posts');
 
@@ -93,13 +106,28 @@ class LocalStorageService {
       };
 
       const request = store.put(postData);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(new StorageError('Failed to save post'));
+      
+      request.onsuccess = () => {
+        console.log('Post saved successfully:', post.id);
+        resolve();
+      };
+      
+      request.onerror = () => {
+        console.error('Failed to save post:', request.error);
+        reject(new StorageError('Failed to save post'));
+      };
+      
+      transaction.onerror = () => {
+        console.error('Transaction failed:', transaction.error);
+        reject(new StorageError('Transaction failed'));
+      };
     });
   }
 
   async getPosts(): Promise<Post[]> {
     this.ensureDB();
+    console.log('Loading posts from IndexedDB');
+    
     const transaction = this.db!.transaction(['posts'], 'readonly');
     const store = transaction.objectStore('posts');
 
@@ -115,9 +143,13 @@ class LocalStorageService {
             timestamp: new Date(analysis.timestamp)
           }))
         }));
+        console.log('Loaded posts from IndexedDB:', posts.length, 'posts');
         resolve(posts);
       };
-      request.onerror = () => reject(new StorageError('Failed to get posts'));
+      request.onerror = () => {
+        console.error('Failed to load posts:', request.error);
+        reject(new StorageError('Failed to get posts'));
+      };
     });
   }
 

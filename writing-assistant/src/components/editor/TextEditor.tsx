@@ -33,13 +33,21 @@ export function TextEditor({
   }, []);
 
   // Handle content changes
-  const handleInput = useCallback(() => {
+  const handleInput = useCallback((e: Event) => {
     if (!editorRef.current) return;
 
     const text = editorRef.current.innerText || '';
+    console.log('Text editor input:', text.length, 'characters');
     updateCounts(text);
     onChange(text);
   }, [onChange, updateCounts]);
+
+  // Handle paste events
+  const handlePaste = useCallback((e: ClipboardEvent) => {
+    e.preventDefault();
+    const text = e.clipboardData?.getData('text/plain') || '';
+    document.execCommand('insertText', false, text);
+  }, []);
 
   // Handle keyboard shortcuts
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -99,15 +107,46 @@ export function TextEditor({
   // Initialize editor
   useEffect(() => {
     if (editorRef.current && content !== editorRef.current.innerText) {
+      console.log('Updating editor content:', content.length, 'characters');
       editorRef.current.innerText = content;
-      updateCounts(content);
+      // Update counts inline to avoid dependency issues
+      const words = content.trim().split(/\s+/).filter(word => word.length > 0).length;
+      setWordCount(words);
+      setCharacterCount(content.length);
     }
-  }, [content, updateCounts]);
+  }, [content]); // Only run when content prop changes
+
+  // Setup event listeners
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    console.log('Setting up text editor event listeners');
+    
+    // Add event listeners
+    editor.addEventListener('input', handleInput);
+    editor.addEventListener('paste', handlePaste);
+    
+    return () => {
+      console.log('Cleaning up text editor event listeners');
+      editor.removeEventListener('input', handleInput);
+      editor.removeEventListener('paste', handlePaste);
+    };
+  }, []); // Empty dependency array to prevent re-setup
 
   // Auto-focus
   useEffect(() => {
     if (autoFocus && editorRef.current) {
+      console.log('Auto-focusing text editor');
       editorRef.current.focus();
+      
+      // Position cursor at end of content
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.selectNodeContents(editorRef.current);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
     }
   }, [autoFocus]);
 
@@ -193,10 +232,15 @@ export function TextEditor({
           ref={editorRef}
           contentEditable
           className="h-full p-6 text-gray-900 dark:text-white text-lg leading-relaxed outline-none"
-          style={{ minHeight: '100%' }}
-          onInput={handleInput}
+          style={{ minHeight: '100%', cursor: 'text' }}
           onKeyDown={handleKeyDown}
           onMouseUp={handleMouseUp}
+          onFocus={() => console.log('Text editor focused')}
+          onBlur={() => console.log('Text editor blurred')}
+          onClick={() => {
+            console.log('Text editor clicked');
+            editorRef.current?.focus();
+          }}
           suppressContentEditableWarning
           data-placeholder={placeholder}
         />
