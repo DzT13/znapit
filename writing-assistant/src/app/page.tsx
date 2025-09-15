@@ -1,25 +1,27 @@
 'use client'
 
 import React from 'react';
+import { useRouter } from 'next/navigation';
 import { useApp } from '@/providers/AppProvider';
 import { PostsGrid } from '@/components/posts/PostsGrid';
 import { PlusIcon, DocumentTextIcon } from '@heroicons/react/24/outline';
 
 export default function DashboardPage() {
+  const router = useRouter();
   const { state, actions } = useApp();
   const { posts, isLoading, error } = state;
 
   const handleCreatePost = async () => {
     try {
-      const post = await actions.createPost('New Post');
-      window.location.href = `/post/${post.id}`;
+      const post = await actions.createPost('');
+      router.push(`/post/${post.id}`);
     } catch (error) {
       console.error('Failed to create post:', error);
     }
   };
 
   const handlePostClick = (post: any) => {
-    window.location.href = `/post/${post.id}`;
+    router.push(`/post/${post.id}`);
   };
 
   const handleDeletePost = async (postId: string) => {

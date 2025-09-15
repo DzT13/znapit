@@ -1,8 +1,9 @@
 'use client'
 
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useCallback, useMemo } from 'react';
-import { Post, ChatConversation, UserSettings, AppState } from '@/types';
+import { Post, ChatConversation, UserSettings, AppState, AnalysisResult, AIProviderConfig } from '@/types';
 import { storageService } from '@/services/storage';
+import { AIService, createAIService, DEFAULT_AI_PROVIDERS } from '@/services/ai';
 
 // Action types
 type AppAction =
@@ -19,7 +20,20 @@ type AppAction =
   | { type: 'SET_ANALYZING'; payload: boolean }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string | null }
-  | { type: 'SET_SETTINGS'; payload: UserSettings };
+  | { type: 'SET_SETTINGS'; payload: UserSettings }
+  | { type: 'SET_ANALYSIS_RESULT'; payload: { postId: string; result: AnalysisResult } }
+  | { type: 'UPDATE_AI_SETTINGS'; payload: AIProviderConfig }
+  | { type: 'SET_AI_ERROR'; payload: string | null };
+
+// Default user settings with AI provider
+const defaultSettings: UserSettings = {
+  theme: 'system',
+  autoSave: true,
+  analysisThreshold: 50,
+  defaultVerbosity: 'normal',
+  shortcuts: {},
+  aiProvider: DEFAULT_AI_PROVIDERS.openai
+};
 
 // Initial state
 const initialState: AppState = {
@@ -30,6 +44,8 @@ const initialState: AppState = {
   isAnalyzing: false,
   isLoading: false,
   error: null,
+  settings: defaultSettings,
+  aiError: null
 };
 
 // Reducer
@@ -81,6 +97,36 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, isLoading: action.payload };
     case 'SET_ERROR':
       return { ...state, error: action.payload };
+    case 'SET_SETTINGS':
+      return { ...state, settings: action.payload };
+    case 'SET_ANALYSIS_RESULT':
+      return {
+        ...state,
+        posts: state.posts.map(post =>
+          post.id === action.payload.postId
+            ? {
+                ...post,
+                analysisHistory: [...post.analysisHistory, action.payload.result]
+              }
+            : post
+        ),
+        currentPost: state.currentPost?.id === action.payload.postId
+          ? {
+              ...state.currentPost,
+              analysisHistory: [...state.currentPost.analysisHistory, action.payload.result]
+            }
+          : state.currentPost
+      };
+    case 'UPDATE_AI_SETTINGS':
+      return {
+        ...state,
+        settings: {
+          ...state.settings,
+          aiProvider: action.payload
+        }
+      };
+    case 'SET_AI_ERROR':
+      return { ...state, aiError: action.payload };
     default:
       return state;
   }
@@ -90,6 +136,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
 const AppContext = createContext<{
   state: AppState;
   dispatch: React.Dispatch<AppAction>;
+  aiService: AIService;
   actions: {
     loadData: () => Promise<void>;
     createPost: (title: string, content?: string) => Promise<Post>;
@@ -101,6 +148,9 @@ const AppContext = createContext<{
     deleteConversation: (id: string) => Promise<void>;
     setCurrentConversation: (conversation: ChatConversation | null) => void;
     setError: (error: string | null) => void;
+    analyzeContent: (content: string, postId: string) => Promise<AnalysisResult | null>;
+    updateAISettings: (config: AIProviderConfig) => Promise<void>;
+    testAIConnection: () => Promise<boolean>;
   };
 } | null>(null);
 
@@ -123,6 +173,12 @@ function countWords(text: string): number {
 // Provider component
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
+  
+  // Create AI service instance
+  const aiService = useMemo(
+    () => createAIService(state.settings.aiProvider),
+    [state.settings.aiProvider]
+  );
 
   // Initialize storage and load data
   const loadData = useCallback(async () => {
@@ -130,13 +186,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'SET_LOADING', payload: true });
       await storageService.init();
       
-      const [posts, conversations] = await Promise.all([
+      const [posts, conversations, settings] = await Promise.all([
         storageService.getPosts(),
         storageService.getConversations(),
+        storageService.getSettings().catch(() => defaultSettings), // Use default if no settings found
       ]);
       
       dispatch({ type: 'SET_POSTS', payload: posts });
       dispatch({ type: 'SET_CONVERSATIONS', payload: conversations });
+      dispatch({ type: 'SET_SETTINGS', payload: settings });
       dispatch({ type: 'SET_ERROR', payload: null });
     } catch (error) {
       console.error('Failed to load data:', error);
@@ -267,6 +325,72 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_ERROR', payload: error });
   }, []);
 
+  // AI analysis actions
+  const analyzeContent = useCallback(async (content: string, postId: string): Promise<AnalysisResult | null> => {
+    if (!content.trim() || content.split(/\s+/).length < state.settings.analysisThreshold) {
+      dispatch({ type: 'SET_AI_ERROR', payload: 'Content too short for analysis' });
+      return null;
+    }
+
+    try {
+      dispatch({ type: 'SET_ANALYZING', payload: true });
+      dispatch({ type: 'SET_AI_ERROR', payload: null });
+      
+      const result = await aiService.analyzeContent(content, postId);
+      
+      // Add to post analysis history
+      dispatch({ type: 'SET_ANALYSIS_RESULT', payload: { postId, result } });
+      
+      // Update the post in storage
+      const post = state.posts.find(p => p.id === postId);
+      if (post) {
+        const updatedPost = {
+          ...post,
+          analysisHistory: [...post.analysisHistory, result]
+        };
+        await storageService.savePost(updatedPost);
+      }
+      
+      return result;
+    } catch (error) {
+      console.error('AI analysis failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Analysis failed';
+      dispatch({ type: 'SET_AI_ERROR', payload: errorMessage });
+      return null;
+    } finally {
+      dispatch({ type: 'SET_ANALYZING', payload: false });
+    }
+  }, [aiService, state.posts, state.settings.analysisThreshold]);
+
+  const updateAISettings = useCallback(async (config: AIProviderConfig): Promise<void> => {
+    try {
+      const updatedSettings = {
+        ...state.settings,
+        aiProvider: config
+      };
+      
+      await storageService.saveSettings(updatedSettings);
+      dispatch({ type: 'UPDATE_AI_SETTINGS', payload: config });
+      dispatch({ type: 'SET_AI_ERROR', payload: null });
+    } catch (error) {
+      console.error('Failed to update AI settings:', error);
+      dispatch({ type: 'SET_AI_ERROR', payload: 'Failed to save AI settings' });
+      throw error;
+    }
+  }, [state.settings]);
+
+  const testAIConnection = useCallback(async (): Promise<boolean> => {
+    try {
+      dispatch({ type: 'SET_AI_ERROR', payload: null });
+      return await aiService.testConnection();
+    } catch (error) {
+      console.error('AI connection test failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Connection test failed';
+      dispatch({ type: 'SET_AI_ERROR', payload: errorMessage });
+      return false;
+    }
+  }, [aiService]);
+
   // Load data on mount
   useEffect(() => {
     loadData();
@@ -283,10 +407,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     deleteConversation,
     setCurrentConversation,
     setError,
-  }), [loadData, createPost, updatePost, deletePost, setCurrentPost, createConversation, updateConversation, deleteConversation, setCurrentConversation, setError]);
+    analyzeContent,
+    updateAISettings,
+    testAIConnection,
+  }), [loadData, createPost, updatePost, deletePost, setCurrentPost, createConversation, updateConversation, deleteConversation, setCurrentConversation, setError, analyzeContent, updateAISettings, testAIConnection]);
 
   return (
-    <AppContext.Provider value={{ state, dispatch, actions }}>
+    <AppContext.Provider value={{ state, dispatch, aiService, actions }}>
       {children}
     </AppContext.Provider>
   );

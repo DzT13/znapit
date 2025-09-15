@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { 
   HomeIcon, 
   PencilSquareIcon, 
@@ -49,13 +49,14 @@ const navigation = [
 
 export function Navigation() {
   const pathname = usePathname();
+  const router = useRouter();
   const { actions } = useApp();
 
   const handleCreatePost = async () => {
     try {
-      const post = await actions.createPost('New Post');
+      const post = await actions.createPost('');
       // Navigate to the new post editor
-      window.location.href = `/post/${post.id}`;
+      router.push(`/post/${post.id}`);
     } catch (error) {
       console.error('Failed to create post:', error);
     }
@@ -66,7 +67,7 @@ export function Navigation() {
       const conversation = await actions.createConversation('New Chat');
       actions.setCurrentConversation(conversation);
       // Navigate to chat
-      window.location.href = '/chat';
+      router.push('/chat');
     } catch (error) {
       console.error('Failed to create conversation:', error);
     }

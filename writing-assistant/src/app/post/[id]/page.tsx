@@ -1,10 +1,11 @@
 'use client'
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useApp } from '@/providers/AppProvider';
 import { TextEditor } from '@/components/editor/TextEditor';
 import { AIAnalysisPanel } from '@/components/ai/AIAnalysisPanel';
+import { storageService } from '@/services/storage';
 import { 
   ArrowLeftIcon, 
   CloudArrowUpIcon, 
@@ -13,7 +14,7 @@ import {
   EyeIcon,
   TrashIcon
 } from '@heroicons/react/24/outline';
-import { Post } from '@/types';
+import { Post, AnalysisResult } from '@/types';
 
 export default function PostEditorPage() {
   const params = useParams();
@@ -23,28 +24,51 @@ export default function PostEditorPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const postId = params.id as string;
+  
+  // Get the latest analysis result for this post
+  const latestAnalysisResult = useMemo((): AnalysisResult | null => {
+    if (!currentPost || currentPost.analysisHistory.length === 0) {
+      return null;
+    }
+    return currentPost.analysisHistory[currentPost.analysisHistory.length - 1];
+  }, [currentPost?.analysisHistory]);
 
   // Load post data
   useEffect(() => {
     const loadPost = async () => {
       setIsLoading(true);
       try {
+        // Wait for app state to be ready (not loading)
+        if (state.isLoading) {
+          setIsLoading(false);
+          return;
+        }
+
         // First check if it's in the current state
         let post = state.posts.find(p => p.id === postId);
         
         if (!post) {
-          // If not in state, try to load from storage
-          // For now, create a new post if not found
-          if (postId === 'new') {
-            post = await actions.createPost('Untitled Post');
-            router.replace(`/post/${post.id}`);
-          } else {
-            // Post not found, redirect to dashboard
-            router.push('/');
-            return;
+          // If not in state, try to load directly from storage
+          try {
+            const postFromStorage = await storageService.getPost(postId);
+            post = postFromStorage || undefined;
+          } catch (storageError) {
+            console.error('Failed to load post from storage:', storageError);
+          }
+          
+          if (!post) {
+            // Handle special case for 'new' postId
+            if (postId === 'new') {
+              post = await actions.createPost('Untitled Post');
+              router.replace(`/post/${post.id}`);
+            } else {
+              // Post not found, redirect to dashboard
+              console.log('Post not found:', postId);
+              router.push('/');
+              return;
+            }
           }
         }
         
@@ -58,10 +82,10 @@ export default function PostEditorPage() {
       }
     };
 
-    if (postId) {
+    if (postId && !state.isLoading) {
       loadPost();
     }
-  }, [postId]); // Remove state.posts, actions, router to prevent infinite loops
+  }, [postId, state.isLoading, state.posts.length]); // Added state.posts.length to detect when posts are loaded
 
   // Auto-save functionality - using interval to prevent infinite loops
   useEffect(() => {
@@ -129,18 +153,20 @@ export default function PostEditorPage() {
   };
 
   const handleAnalyze = async () => {
-    if (!currentPost || isAnalyzing) return;
+    if (!currentPost || state.isAnalyzing) return;
     
-    setIsAnalyzing(true);
     try {
-      // TODO: Implement AI analysis
-      console.log('Analyzing content...');
-      // This will be implemented when we create the AI service
+      const result = await actions.analyzeContent(currentPost.content, currentPost.id);
+      if (result) {
+        // Update the current post with the new analysis
+        setCurrentPost(prev => prev ? {
+          ...prev,
+          analysisHistory: [...prev.analysisHistory, result]
+        } : null);
+      }
     } catch (error) {
       console.error('Failed to analyze content:', error);
       actions.setError('Failed to analyze content');
-    } finally {
-      setIsAnalyzing(false);
     }
   };
 
@@ -228,11 +254,11 @@ export default function PostEditorPage() {
 
             <button
               onClick={handleAnalyze}
-              disabled={isAnalyzing || !currentPost.content.trim()}
+              disabled={state.isAnalyzing || !currentPost.content.trim()}
               className="flex items-center px-3 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors disabled:opacity-50"
             >
               <SparklesIcon className="w-4 h-4 mr-2" />
-              {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+              {state.isAnalyzing ? 'Analyzing...' : 'Analyze'}
             </button>
 
             <button
@@ -300,9 +326,10 @@ export default function PostEditorPage() {
         <div className="w-96 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
           <AIAnalysisPanel
             content={currentPost.content}
-            isAnalyzing={isAnalyzing}
-            analysisResults={null} // TODO: Get from analysis service
+            isAnalyzing={state.isAnalyzing}
+            analysisResults={latestAnalysisResult}
             onAnalyze={handleAnalyze}
+            error={state.aiError}
           />
         </div>
       </div>

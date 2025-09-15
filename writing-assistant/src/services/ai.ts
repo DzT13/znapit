@@ -1,100 +1,41 @@
-import OpenAI from 'openai';
-import { AIConfig, AnalysisResponse, ChatResponse, ChatMessage, AIServiceError } from '@/types';
+import { AnalysisResult, Suggestion, AmbiguousPhrase, AIServiceError, AIProviderConfig } from '@/types';
 
-class AIService {
-  private client: OpenAI | null = null;
-  private config: AIConfig = {
-    apiKey: '',
-    model: 'gpt-4',
-    temperature: 0.7,
-    maxTokens: 2000,
-    verbosity: 'normal'
-  };
-  private rateLimitQueue: Array<() => Promise<any>> = [];
-  private isProcessingQueue = false;
-  private lastRequestTime = 0;
-  private requestInterval = 1000; // 1 second between requests
+/**
+ * AI Service for content analysis using OpenAI-compatible APIs
+ * Supports custom providers with different base URLs
+ */
+export class AIService {
+  private config: AIProviderConfig;
 
-  constructor() {
-    this.initializeClient();
+  constructor(config: AIProviderConfig) {
+    this.config = config;
   }
 
-  private initializeClient() {
-    const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY || localStorage.getItem('openai_api_key');
-    
-    if (apiKey) {
-      this.config.apiKey = apiKey;
-      this.client = new OpenAI({
-        apiKey: apiKey,
-        dangerouslyAllowBrowser: true // For client-side usage
-      });
-    }
+  /**
+   * Update the AI provider configuration
+   */
+  updateConfig(config: AIProviderConfig): void {
+    this.config = config;
   }
 
-  public setApiKey(apiKey: string) {
-    this.config.apiKey = apiKey;
-    localStorage.setItem('openai_api_key', apiKey);
-    this.client = new OpenAI({
-      apiKey: apiKey,
-      dangerouslyAllowBrowser: true
-    });
+  /**
+   * Check if the AI service is properly configured
+   */
+  isConfigured(): boolean {
+    return !!(
+      this.config.enabled &&
+      this.config.apiKey &&
+      this.config.baseUrl &&
+      this.config.model
+    );
   }
 
-  public updateConfig(config: Partial<AIConfig>) {
-    this.config = { ...this.config, ...config };
-  }
-
-  public isConfigured(): boolean {
-    return !!this.client && !!this.config.apiKey;
-  }
-
-  private async rateLimitedRequest<T>(request: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this.rateLimitQueue.push(async () => {
-        try {
-          const result = await request();
-          resolve(result);
-        } catch (error) {
-          reject(error);
-        }
-      });
-
-      this.processQueue();
-    });
-  }
-
-  private async processQueue() {
-    if (this.isProcessingQueue || this.rateLimitQueue.length === 0) {
-      return;
-    }
-
-    this.isProcessingQueue = true;
-
-    while (this.rateLimitQueue.length > 0) {
-      const now = Date.now();
-      const timeSinceLastRequest = now - this.lastRequestTime;
-
-      if (timeSinceLastRequest < this.requestInterval) {
-        await new Promise(resolve => setTimeout(resolve, this.requestInterval - timeSinceLastRequest));
-      }
-
-      const request = this.rateLimitQueue.shift();
-      if (request) {
-        try {
-          await request();
-        } catch (error) {
-          console.error('Request failed:', error);
-        }
-        this.lastRequestTime = Date.now();
-      }
-    }
-
-    this.isProcessingQueue = false;
-  }
-
-  public async analyzeContent(content: string): Promise<AnalysisResponse> {
+  /**
+   * Analyze content and return detailed analysis results
+   */
+  async analyzeContent(content: string, postId: string): Promise<AnalysisResult> {
     if (!this.isConfigured()) {
-      throw new AIServiceError('AI service not configured. Please set your OpenAI API key.');
+      throw new AIServiceError('AI service is not properly configured');
     }
 
     if (!content.trim()) {
@@ -102,316 +43,513 @@ class AIService {
     }
 
     try {
-      const response = await this.rateLimitedRequest(async () => {
-        return await this.client!.chat.completions.create({
-          model: this.config.model,
-          messages: [
-            {
-              role: 'system',
-              content: this.getAnalysisSystemPrompt()
-            },
-            {
-              role: 'user',
-              content: `Please analyze the following text for clarity, readability, tone, and potential improvements:\n\n${content}`
-            }
-          ],
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens
-        });
-      });
-
-      const analysisText = response.choices[0]?.message?.content;
-      if (!analysisText) {
-        throw new AIServiceError('No analysis received from AI service');
-      }
-
-      // Parse the structured response
-      const analysisResult = this.parseAnalysisResponse(analysisText, content);
-
-      return {
-        success: true,
-        data: analysisResult
-      };
-
-    } catch (error) {
-      console.error('Analysis failed:', error);
+      const analysisPrompt = this.buildAnalysisPrompt(content);
+      // Use higher max_tokens for analysis to prevent truncation
+      const response = await this.makeAPICall(analysisPrompt, 2000);
       
+      return this.parseAnalysisResponse(response, content, postId);
+    } catch (error) {
+      console.error('AI analysis failed:', error);
       if (error instanceof AIServiceError) {
         throw error;
       }
-
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      throw new AIServiceError(`Analysis failed: ${errorMessage}`);
+      throw new AIServiceError('Failed to analyze content: ' + (error as Error).message);
     }
   }
 
-  public async sendChatMessage(
-    messages: ChatMessage[],
-    newMessage: string,
-    context?: { postId?: string; analysisId?: string }
-  ): Promise<ChatResponse> {
+  /**
+   * Generate a writing suggestion based on content
+   */
+  async generateSuggestion(content: string, context?: string): Promise<string> {
     if (!this.isConfigured()) {
-      throw new AIServiceError('AI service not configured. Please set your OpenAI API key.');
+      throw new AIServiceError('AI service is not properly configured');
     }
 
     try {
-      // Convert our messages to OpenAI format
-      const openAIMessages = [
-        {
-          role: 'system' as const,
-          content: this.getChatSystemPrompt()
-        },
-        ...messages.map(msg => ({
-          role: msg.role as 'user' | 'assistant',
-          content: msg.content
-        })),
-        {
-          role: 'user' as const,
-          content: newMessage
-        }
-      ];
-
-      const response = await this.rateLimitedRequest(async () => {
-        return await this.client!.chat.completions.create({
-          model: this.config.model,
-          messages: openAIMessages,
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens
-        });
-      });
-
-      const aiResponse = response.choices[0]?.message?.content;
-      if (!aiResponse) {
-        throw new AIServiceError('No response received from AI service');
-      }
-
-      const responseMessage: ChatMessage = {
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        role: 'assistant',
-        content: aiResponse,
-        timestamp: new Date(),
-        context,
-        metadata: {
-          wordCount: aiResponse.split(/\s+/).length,
-          processingTime: Date.now() - Date.now() // This would be calculated properly
-        }
-      };
-
-      return {
-        success: true,
-        data: {
-          message: responseMessage
-        }
-      };
-
-    } catch (error) {
-      console.error('Chat message failed:', error);
+      const prompt = this.buildSuggestionPrompt(content, context);
+      const response = await this.makeAPICall(prompt, 200);
       
-      if (error instanceof AIServiceError) {
-        throw error;
-      }
-
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      throw new AIServiceError(`Chat failed: ${errorMessage}`);
+      return this.extractTextFromResponse(response);
+    } catch (error) {
+      console.error('AI suggestion failed:', error);
+      throw new AIServiceError('Failed to generate suggestion: ' + (error as Error).message);
     }
   }
 
-  public async streamChatMessage(
-    messages: ChatMessage[],
-    newMessage: string,
-    onChunk: (chunk: string) => void,
-    context?: { postId?: string; analysisId?: string }
-  ): Promise<ChatResponse> {
+  /**
+   * Test the connection to the AI provider
+   */
+  async testConnection(): Promise<boolean> {
     if (!this.isConfigured()) {
-      throw new AIServiceError('AI service not configured. Please set your OpenAI API key.');
+      return false;
     }
 
     try {
-      const openAIMessages = [
+      const testPrompt = [
         {
-          role: 'system' as const,
-          content: this.getChatSystemPrompt()
-        },
-        ...messages.map(msg => ({
-          role: msg.role as 'user' | 'assistant',
-          content: msg.content
-        })),
-        {
-          role: 'user' as const,
-          content: newMessage
+          role: 'user',
+          content: 'Please respond with just "OK" to test the connection.'
         }
       ];
 
-      const stream = await this.rateLimitedRequest(async () => {
-        return await this.client!.chat.completions.create({
-          model: this.config.model,
-          messages: openAIMessages,
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens,
-          stream: true
-        });
-      });
-
-      let fullResponse = '';
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || '';
-        if (content) {
-          fullResponse += content;
-          onChunk(content);
-        }
-      }
-
-      const responseMessage: ChatMessage = {
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        role: 'assistant',
-        content: fullResponse,
-        timestamp: new Date(),
-        context,
-        metadata: {
-          wordCount: fullResponse.split(/\s+/).length,
-          processingTime: Date.now() - Date.now()
-        }
-      };
-
-      return {
-        success: true,
-        data: {
-          message: responseMessage,
-          stream: true
-        }
-      };
-
-    } catch (error) {
-      console.error('Streaming chat failed:', error);
+      const response = await this.makeAPICall(testPrompt, 10);
+      const text = this.extractTextFromResponse(response);
       
-      if (error instanceof AIServiceError) {
-        throw error;
-      }
-
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      throw new AIServiceError(`Streaming chat failed: ${errorMessage}`);
+      return text.toLowerCase().includes('ok');
+    } catch (error) {
+      console.error('Connection test failed:', error);
+      return false;
     }
   }
 
-  private getAnalysisSystemPrompt(): string {
-    return `You are a professional writing editor and coach. Your role is to analyze written content and provide constructive feedback.
-
-Your analysis should cover:
-1. Readability and clarity (score 1-10)
-2. Tone assessment
-3. Target audience identification
-4. Specific suggestions for improvement
-5. Identification of ambiguous phrases
-
-Respond in this JSON format:
+  /**
+   * Build the analysis prompt for content evaluation
+   */
+  private buildAnalysisPrompt(content: string) {
+    return [
+      {
+        role: 'system',
+        content: `You are an expert writing assistant. Analyze the provided text and return a JSON response with the following structure:
 {
-  "readabilityScore": number,
-  "clarityScore": number,
-  "toneAnalysis": "string",
-  "targetAudience": "string",
+  "metrics": {
+    "readabilityScore": <number 1-10>,
+    "clarityScore": <number 1-10>,
+    "toneAnalysis": "<descriptive tone>",
+    "targetAudience": "<audience description>"
+  },
   "suggestions": [
     {
-      "type": "clarity|tone|structure|grammar",
-      "severity": "low|medium|high",
-      "description": "string",
-      "originalText": "string",
-      "suggestedText": "string",
-      "position": {"start": number, "end": number}
+      "type": "<clarity|tone|structure|grammar>",
+      "severity": "<low|medium|high>",
+      "description": "<explanation>",
+      "originalText": "<text to improve>",
+      "suggestedText": "<improved version>",
+      "position": {"start": <number>, "end": <number>}
     }
   ],
   "ambiguousPhrases": [
     {
-      "text": "string",
-      "position": {"start": number, "end": number},
-      "reason": "string",
-      "suggestions": ["string"]
+      "text": "<ambiguous phrase>",
+      "position": {"start": <number>, "end": <number>},
+      "reason": "<why it's ambiguous>",
+      "suggestions": ["<alternative 1>", "<alternative 2>"]
     }
   ]
 }
 
-Be constructive and specific in your feedback. Focus on helping the writer improve their content.`;
+Provide specific, actionable feedback. Focus on improving clarity, readability, and engagement.`
+      },
+      {
+        role: 'user',
+        content: `Please analyze this text:\n\n${content}`
+      }
+    ];
   }
 
-  private getChatSystemPrompt(): string {
-    const verbosityInstructions = {
-      concise: 'Keep responses brief and to the point.',
-      normal: 'Provide balanced responses with adequate detail.',
-      detailed: 'Give comprehensive responses with examples and explanations.'
+  /**
+   * Build suggestion prompt for specific writing help
+   */
+  private buildSuggestionPrompt(content: string, context?: string) {
+    const contextText = context ? `\n\nContext: ${context}` : '';
+    
+    return [
+      {
+        role: 'system',
+        content: 'You are a helpful writing assistant. Provide concise, actionable suggestions to improve the given text. Focus on clarity, engagement, and effectiveness.'
+      },
+      {
+        role: 'user',
+        content: `Please provide a suggestion to improve this text:${contextText}\n\n${content}`
+      }
+    ];
+  }
+
+  /**
+   * Make API call to the configured provider
+   */
+  private async makeAPICall(messages: any[], maxTokens?: number): Promise<any> {
+    const url = `${this.config.baseUrl}/chat/completions`;
+    
+    const requestBody = {
+      model: this.config.model,
+      messages,
+      temperature: this.config.temperature,
+      max_tokens: maxTokens || this.config.maxTokens,
+      response_format: maxTokens ? undefined : { type: 'json_object' }
     };
 
-    return `You are a professional writing assistant and editor. Your role is to help users improve their writing through:
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
 
-1. Answering questions about writing techniques and best practices
-2. Providing feedback on content clarity and style
-3. Suggesting improvements for readability and engagement
-4. Explaining grammar and style rules
-5. Helping with content structure and organization
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMessage = `API request failed: ${response.status} ${response.statusText}`;
+      
+      try {
+        const errorData = JSON.parse(errorText);
+        errorMessage = errorData.error?.message || errorMessage;
+      } catch {
+        // Use the default error message if JSON parsing fails
+      }
+      
+      throw new AIServiceError(errorMessage, response.status.toString());
+    }
 
-Guidelines:
-- ${verbosityInstructions[this.config.verbosity]}
-- Be supportive and constructive in your feedback
-- Ask clarifying questions when needed
-- Provide specific, actionable advice
-- Respect the user's writing style and voice
-- Never rewrite content without explicit permission
-
-Maintain a helpful, professional tone while being approachable and encouraging.`;
+    return await response.json();
   }
 
-  private parseAnalysisResponse(analysisText: string, originalContent: string): any {
+  /**
+   * Extract text content from API response
+   */
+  private extractTextFromResponse(response: any): string {
     try {
-      // Try to parse as JSON first
-      const parsed = JSON.parse(analysisText);
+      return response.choices[0]?.message?.content || '';
+    } catch (error) {
+      throw new AIServiceError('Invalid response format from AI provider');
+    }
+  }
+
+  /**
+   * Create a fallback analysis result when AI parsing fails
+   */
+  private createFallbackAnalysis(postId: string, originalContent: string, errorMessage: string): AnalysisResult {
+    const analysisId = `fallback-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const wordCount = originalContent.trim().split(/\s+/).filter(word => word.length > 0).length;
+    
+    return {
+      id: analysisId,
+      postId,
+      timestamp: new Date(),
+      metrics: {
+        readabilityScore: 5,
+        clarityScore: 5,
+        toneAnalysis: 'Unable to analyze - AI service error',
+        targetAudience: 'General audience'
+      },
+      suggestions: [{
+        type: 'clarity',
+        severity: 'low',
+        description: `AI analysis failed: ${errorMessage}. Please check your AI configuration or try again later.`,
+        originalText: '',
+        suggestedText: '',
+        position: { start: 0, end: 0 }
+      }],
+      ambiguousPhrases: []
+    };
+  }
+
+  /**
+   * Attempt to repair truncated or malformed JSON
+   */
+  private attemptJSONRepair(jsonString: string): string | null {
+    try {
+      let repairedJSON = jsonString.trim();
+      console.log('Starting JSON repair on:', repairedJSON.length, 'characters');
       
-      // Add required fields with defaults if missing
+      // Check if JSON is truncated (doesn't end with proper closing)
+      const openBraces = (repairedJSON.match(/\{/g) || []).length;
+      const closeBraces = (repairedJSON.match(/\}/g) || []).length;
+      const openBrackets = (repairedJSON.match(/\[/g) || []).length;
+      const closeBrackets = (repairedJSON.match(/\]/g) || []).length;
+      
+      console.log('Brace/bracket counts:', { openBraces, closeBraces, openBrackets, closeBrackets });
+      
+      // If we have unmatched braces/brackets, try to close them
+      if (openBraces > closeBraces || openBrackets > closeBrackets) {
+        console.log('Detected truncated JSON, attempting repair...');
+        
+        // Strategy 1: Remove incomplete trailing content
+        // Look for incomplete string values at the end (pattern: "key": "incomplete_value)
+        const incompleteStringMatch = repairedJSON.match(/(.*?)"[^"]*"\s*:\s*"[^"]*$/);
+        if (incompleteStringMatch) {
+          console.log('Found incomplete string value, truncating...');
+          repairedJSON = incompleteStringMatch[1].replace(/,\s*$/, ''); // Remove trailing comma if any
+        }
+        
+        // Strategy 2: Remove incomplete object/array at the end
+        // Find the last complete comma-separated item
+        const lastCommaIndex = repairedJSON.lastIndexOf(',');
+        const lastOpenBrace = repairedJSON.lastIndexOf('{');
+        const lastOpenBracket = repairedJSON.lastIndexOf('[');
+        
+        // If there's incomplete content after the last comma, remove it
+        if (lastCommaIndex > Math.max(lastOpenBrace, lastOpenBracket)) {
+          const afterComma = repairedJSON.substring(lastCommaIndex + 1).trim();
+          // Check if content after comma is incomplete (no closing quote or brace)
+          if (afterComma && !afterComma.match(/^\s*"[^"]+"\s*:\s*[^,}\]]+[}\]]/)) {
+            console.log('Removing incomplete content after last comma');
+            repairedJSON = repairedJSON.substring(0, lastCommaIndex);
+          }
+        }
+        
+        // Strategy 3: Handle incomplete quoted strings
+        const quoteCount = (repairedJSON.match(/"/g) || []).length;
+        if (quoteCount % 2 !== 0) {
+          console.log('Closing unclosed quote');
+          repairedJSON += '"';
+        }
+        
+        // Strategy 4: Close missing brackets and braces in proper order
+        // Close arrays first (innermost structures), then objects
+        const missingCloseBrackets = openBrackets - closeBrackets;
+        for (let i = 0; i < missingCloseBrackets; i++) {
+          console.log('Adding missing ] bracket');
+          repairedJSON += ']';
+        }
+        
+        const missingCloseBraces = openBraces - closeBraces;
+        for (let i = 0; i < missingCloseBraces; i++) {
+          console.log('Adding missing } brace');
+          repairedJSON += '}';
+        }
+        
+        console.log('Repaired JSON preview:', repairedJSON.substring(0, 200) + '...');
+        console.log('Repaired JSON ending:', repairedJSON.substring(Math.max(0, repairedJSON.length - 100)));
+        
+        // Test if the repaired JSON is valid
+        JSON.parse(repairedJSON);
+        console.log('JSON repair successful!');
+        return repairedJSON;
+      }
+      
+      console.log('JSON appears complete, no repair needed');
+      return null; // No repair needed
+    } catch (error) {
+      console.error('JSON repair failed:', error);
+      console.error('Failed JSON preview:', jsonString.substring(0, 200) + '...');
+      return null;
+    }
+  }
+
+  /**
+   * Parse analysis response and create AnalysisResult
+   */
+  private parseAnalysisResponse(response: any, originalContent: string, postId: string): AnalysisResult {
+    try {
+      const content = this.extractTextFromResponse(response);
+      
+      // Debug logging to capture actual content before JSON parsing
+      console.log('AI Response raw content:', content);
+      console.log('AI Response content length:', content.length);
+      console.log('AI Response content preview (first 200 chars):', content.substring(0, 200));
+      
+      if (!content || content.trim().length === 0) {
+        throw new Error('Empty response content from AI provider');
+      }
+      
+      // Clean content - remove potential markdown code blocks or extra formatting
+      let cleanContent = content.trim();
+      
+      // Remove markdown JSON code blocks if present
+      if (cleanContent.startsWith('```json')) {
+        cleanContent = cleanContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      } else if (cleanContent.startsWith('```')) {
+        cleanContent = cleanContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
+      
+      // Remove any leading/trailing text that isn't JSON
+      const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        cleanContent = jsonMatch[0];
+      }
+      
+      console.log('AI Response cleaned content:', cleanContent);
+      
+      let analysisData;
+      try {
+        analysisData = JSON.parse(cleanContent);
+        console.log('JSON parsed successfully on first attempt');
+      } catch (parseError) {
+        console.error('JSON Parse Error:', parseError);
+        console.error('Failed content length:', cleanContent.length);
+        console.error('Failed content preview (first 300 chars):', cleanContent.substring(0, 300));
+        console.error('Failed content ending (last 300 chars):', cleanContent.substring(Math.max(0, cleanContent.length - 300)));
+        
+        // Check if this looks like a truncation issue
+        const isTruncationLikely = cleanContent.length > 1000 && (
+          !cleanContent.trim().endsWith('}') || 
+          parseError instanceof Error && parseError.message.includes('position')
+        );
+        
+        if (isTruncationLikely) {
+          console.log('Truncation detected, attempting JSON repair...');
+        }
+        
+        // Attempt to fix truncated JSON
+        const fixedJSON = this.attemptJSONRepair(cleanContent);
+        if (fixedJSON) {
+          console.log('JSON repair attempt successful, trying to parse...');
+          try {
+            analysisData = JSON.parse(fixedJSON);
+            console.log('Successfully parsed repaired JSON! Original length:', cleanContent.length, 'Repaired length:', fixedJSON.length);
+          } catch (repairError) {
+            console.error('Repaired JSON still invalid:', repairError);
+            console.error('Repaired content preview:', fixedJSON.substring(0, 300));
+            throw new Error(`Invalid JSON response from AI provider: ${parseError instanceof Error ? parseError.message : 'Unknown parse error'}. Auto-repair failed: ${repairError instanceof Error ? repairError.message : 'Unknown repair error'}.`);
+          }
+        } else {
+          console.error('JSON repair could not fix the issue');
+          throw new Error(`Invalid JSON response from AI provider: ${parseError instanceof Error ? parseError.message : 'Unknown parse error'}. Content appears to be truncated at position ${cleanContent.length}.`);
+        }
+      }
+      
+      // Validate the response structure
+      if (!analysisData.metrics || !Array.isArray(analysisData.suggestions)) {
+        throw new Error('Invalid analysis response structure');
+      }
+
+      // Generate analysis ID
+      const analysisId = `analysis-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Process suggestions with position validation
+      const suggestions: Suggestion[] = analysisData.suggestions.map((s: any) => ({
+        type: s.type || 'clarity',
+        severity: s.severity || 'low',
+        description: s.description || '',
+        originalText: s.originalText || '',
+        suggestedText: s.suggestedText || '',
+        position: {
+          start: Math.max(0, s.position?.start || 0),
+          end: Math.min(originalContent.length, s.position?.end || 0)
+        }
+      }));
+
+      // Process ambiguous phrases with position validation
+      const ambiguousPhrases: AmbiguousPhrase[] = (analysisData.ambiguousPhrases || []).map((p: any) => ({
+        text: p.text || '',
+        position: {
+          start: Math.max(0, p.position?.start || 0),
+          end: Math.min(originalContent.length, p.position?.end || 0)
+        },
+        reason: p.reason || '',
+        suggestions: Array.isArray(p.suggestions) ? p.suggestions : []
+      }));
+
       return {
-        id: `analysis-${Date.now()}`,
-        postId: '', // Will be set by the calling code
+        id: analysisId,
+        postId,
         timestamp: new Date(),
         metrics: {
-          readabilityScore: parsed.readabilityScore || 7,
-          clarityScore: parsed.clarityScore || 7,
-          toneAnalysis: parsed.toneAnalysis || 'Neutral',
-          targetAudience: parsed.targetAudience || 'General audience'
+          readabilityScore: Math.max(1, Math.min(10, analysisData.metrics.readabilityScore || 5)),
+          clarityScore: Math.max(1, Math.min(10, analysisData.metrics.clarityScore || 5)),
+          toneAnalysis: analysisData.metrics.toneAnalysis || 'Neutral',
+          targetAudience: analysisData.metrics.targetAudience || 'General audience'
         },
-        suggestions: parsed.suggestions || [],
-        ambiguousPhrases: parsed.ambiguousPhrases || []
+        suggestions,
+        ambiguousPhrases
       };
     } catch (error) {
-      // Fallback: create a basic analysis result
-      const wordCount = originalContent.split(/\s+/).length;
-      const sentences = originalContent.split(/[.!?]+/).filter(s => s.trim().length > 0);
-      const avgWordsPerSentence = wordCount / sentences.length || 0;
+      console.error('Failed to parse analysis response:', error);
       
-      // Simple readability estimation
-      const readabilityScore = Math.min(10, Math.max(1, 10 - (avgWordsPerSentence - 15) / 3));
+      // Create detailed error message with context
+      let errorMessage = 'Failed to parse analysis results';
+      if (error instanceof Error) {
+        errorMessage += `: ${error.message}`;
+      }
       
-      return {
-        id: `analysis-${Date.now()}`,
-        postId: '',
-        timestamp: new Date(),
-        metrics: {
-          readabilityScore: Math.round(readabilityScore),
-          clarityScore: 7,
-          toneAnalysis: 'Unable to analyze tone',
-          targetAudience: 'General audience'
-        },
-        suggestions: [{
-          type: 'clarity',
-          severity: 'low',
-          description: 'Analysis could not be completed. Please try again.',
-          originalText: '',
-          suggestedText: '',
-          position: { start: 0, end: 0 }
-        }],
-        ambiguousPhrases: []
-      };
+      // Add additional context for debugging
+      console.error('Analysis parsing error context:', {
+        originalError: error,
+        responseStructure: typeof response,
+        hasChoices: response?.choices?.length > 0,
+        hasContent: !!response?.choices?.[0]?.message?.content,
+        contentType: typeof response?.choices?.[0]?.message?.content
+      });
+      
+      throw new AIServiceError(errorMessage);
     }
   }
 }
 
-// Create and export singleton instance
-export const aiService = new AIService();
+/**
+ * Default AI provider configurations
+ */
+export const DEFAULT_AI_PROVIDERS = {
+  openai: {
+    name: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    model: 'gpt-3.5-turbo',
+    temperature: 0.3,
+    maxTokens: 1000,
+    enabled: false
+  },
+  anthropic: {
+    name: 'Anthropic (via OpenAI-compatible)',
+    baseUrl: 'https://api.anthropic.com/v1',
+    apiKey: '',
+    model: 'claude-3-haiku-20240307',
+    temperature: 0.3,
+    maxTokens: 1000,
+    enabled: false
+  },
+  local: {
+    name: 'Local LLM (Ollama)',
+    baseUrl: 'http://localhost:11434/v1',
+    apiKey: 'not-required',
+    model: 'llama2',
+    temperature: 0.3,
+    maxTokens: 1000,
+    enabled: false
+  },
+  custom: {
+    name: 'Custom Provider',
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    temperature: 0.3,
+    maxTokens: 1000,
+    enabled: false
+  }
+} as const;
 
-// Export the class for testing
-export { AIService };
+/**
+ * Create AI service instance with current settings
+ */
+export function createAIService(config: AIProviderConfig): AIService {
+  return new AIService(config);
+}
+
+/**
+ * Validate AI provider configuration
+ */
+export function validateAIConfig(config: AIProviderConfig): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!config.baseUrl) {
+    errors.push('Base URL is required');
+  } else {
+    try {
+      new URL(config.baseUrl);
+    } catch {
+      errors.push('Invalid base URL format');
+    }
+  }
+
+  if (!config.model) {
+    errors.push('Model name is required');
+  }
+
+  if (!config.apiKey && !config.baseUrl.includes('localhost')) {
+    errors.push('API key is required for remote providers');
+  }
+
+  if (config.temperature < 0 || config.temperature > 2) {
+    errors.push('Temperature must be between 0 and 2');
+  }
+
+  if (config.maxTokens < 1 || config.maxTokens > 4000) {
+    errors.push('Max tokens must be between 1 and 4000');
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors
+  };
+}

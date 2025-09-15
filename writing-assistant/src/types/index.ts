@@ -79,6 +79,8 @@ export interface AppState {
   isAnalyzing: boolean;
   isLoading: boolean;
   error: string | null;
+  settings: UserSettings;
+  aiError: string | null;
 }
 
 // AI service configuration
@@ -104,6 +106,18 @@ export interface UserSettings {
   analysisThreshold: number; // minimum word count for analysis
   defaultVerbosity: 'concise' | 'normal' | 'detailed';
   shortcuts: Record<string, string>;
+  aiProvider: AIProviderConfig;
+}
+
+// AI Provider configuration
+export interface AIProviderConfig {
+  name: string; // e.g., 'OpenAI', 'Anthropic', 'Local', etc.
+  baseUrl: string; // API base URL
+  apiKey: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  enabled: boolean;
 }
 
 // Component prop types
@@ -133,6 +147,7 @@ export interface AIAnalysisPanelProps {
   isAnalyzing: boolean;
   analysisResults: AnalysisResult | null;
   onAnalyze: () => void;
+  error?: string | null;
 }
 
 export interface MessageListProps {

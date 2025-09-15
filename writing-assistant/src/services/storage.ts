@@ -1,4 +1,5 @@
 import { Post, ChatConversation, UserSettings, StorageData, StorageError } from '@/types';
+import { DEFAULT_AI_PROVIDERS } from './ai';
 
 class LocalStorageService {
   private dbName = 'WritingAssistantDB';
@@ -339,7 +340,8 @@ class LocalStorageService {
               'new-post': 'Ctrl+N',
               'analyze': 'Ctrl+E',
               'chat': 'Ctrl+T'
-            }
+            },
+            aiProvider: DEFAULT_AI_PROVIDERS.openai
           };
           resolve(defaultSettings);
         }

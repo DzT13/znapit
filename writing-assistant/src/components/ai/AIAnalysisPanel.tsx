@@ -17,7 +17,8 @@ export function AIAnalysisPanel({
   content, 
   isAnalyzing, 
   analysisResults, 
-  onAnalyze 
+  onAnalyze,
+  error 
 }: AIAnalysisPanelProps) {
   const [activeTab, setActiveTab] = useState<'overview' | 'suggestions' | 'details'>('overview');
 
@@ -139,6 +140,14 @@ export function AIAnalysisPanel({
             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400 text-center">
               Write at least 10 words to enable analysis
             </p>
+          )}
+          {error && (
+            <div className="mt-3 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+              <div className="flex items-center text-red-600 dark:text-red-400">
+                <ExclamationTriangleIcon className="w-4 h-4 mr-2 flex-shrink-0" />
+                <span className="text-sm">{error}</span>
+              </div>
+            </div>
           )}
         </div>
       )}
