@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "@headlessui/react": "^2.2.8",
+    "@heroicons/react": "^2.2.0",
+    "@tailwindcss/line-clamp": "^0.4.4",
+    "@tailwindcss/typography": "^0.5.16",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.544.0",
+    "openai": "^5.20.2"
+  }
+}
